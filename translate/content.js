@@ -25,7 +25,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function translateWithGemini(text) {
+async function translateWithMegaLLM(text) {
   if (!text || text.length === 0) {
     showPopup("No text selected", mouseX, mouseY);
     return null;
@@ -46,7 +46,8 @@ async function translateWithGemini(text) {
     });
   });
 
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${customApiKey}`;
+  // MegaLLM API - OpenAI compatible
+  const apiUrl = "https://ai.megallm.io/v1/chat/completions";
   const prompt = `
     Please translate the following text into ${result}:
     "${text}"
@@ -57,17 +58,22 @@ async function translateWithGemini(text) {
   `;
 
   const body = JSON.stringify({
-    contents: [
+    model: "deepseek-ai/deepseek-v3.1",
+    messages: [
       {
-        parts: [{ text: prompt }],
+        role: "user",
+        content: prompt,
       },
     ],
+    temperature: 0.7,
+    max_tokens: 2048,
   });
 
   const response = await fetch(apiUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      Authorization: `Bearer ${customApiKey}`,
     },
     body: body,
   });
@@ -81,11 +87,68 @@ async function translateWithGemini(text) {
   }
 
   const data = await response.json();
-  if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
+  if (!data.choices?.[0]?.message?.content) {
     throw new Error("Invalid response format");
   }
 
-  return data.candidates[0].content.parts[0].text;
+  return data.choices[0].message.content;
+}
+
+const languageMap = {
+  "Vietnamese": "vi",
+  "English": "en",
+  "French": "fr",
+  "Spanish": "es",
+  "German": "de",
+  "Italian": "it",
+  "Japanese": "ja",
+  "Korean": "ko",
+  "Portuguese": "pt",
+  "Russian": "ru",
+  "Chinese": "zh-CN",
+  "Arabic": "ar",
+  "Dutch": "nl",
+  "Polish": "pl",
+  "Swedish": "sv",
+  "Turkish": "tr",
+};
+
+async function translateWithGoogleFree(text) {
+  if (!text || text.length === 0) {
+    showPopup("No text selected", mouseX, mouseY);
+    return null;
+  }
+
+  const targetLangName = await new Promise((resolve) => {
+    chrome.storage.local.get(["selectedLanguageName"], function (result) {
+      resolve(result.selectedLanguageName || "Vietnamese");
+    });
+  });
+
+  const targetLangCode = languageMap[targetLangName] || "vi";
+
+  // Google Translate GTX API (Free, No Key)
+  const apiUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLangCode}&dt=t&q=${encodeURIComponent(text)}`;
+
+  try {
+    const response = await fetch(apiUrl);
+
+    if (!response.ok) {
+      throw new Error(`Google Translate Error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (data && data[0]) {
+      return data[0].map(sentence => sentence[0]).join("");
+    } else {
+      throw new Error("Invalid response format from Google");
+    }
+
+  } catch (error) {
+    console.error("Google Translate Error:", error);
+    throw error;
+  }
 }
 
 function handleMouseUp() {
@@ -123,14 +186,27 @@ async function handleKeyDown(event) {
         }
 
         showLoadingPopup(mouseX, mouseY);
-        const translatedText = await translateWithGemini(selectedText);
+
+        const mode = await new Promise((resolve) => {
+          chrome.storage.local.get(["translationMode"], function (result) {
+            resolve(result.translationMode || "free");
+          });
+        });
+
+        let translatedText;
+        if (mode === "megallm") {
+          translatedText = await translateWithMegaLLM(selectedText);
+        } else {
+          translatedText = await translateWithGoogleFree(selectedText);
+        }
+
         if (translatedText) {
           showPopup(translatedText, mouseX, mouseY);
           document.addEventListener("click", handleOutsideClick);
         }
       } catch (error) {
         console.error("Translation API failed:", error);
-        showPopup("Translation API failed, please try again", mouseX, mouseY);
+        showPopup("Translation failed, please try again", mouseX, mouseY);
       }
     }
   }

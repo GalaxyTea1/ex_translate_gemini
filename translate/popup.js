@@ -7,8 +7,19 @@ document.addEventListener("DOMContentLoaded", function () {
   const saveButton = document.getElementById("saveButton");
   const settingsIcon = document.getElementById("settingsIcon");
   const languageSelect = document.getElementById("languageSelect");
+  const translationModeSelect = document.getElementById("translationMode");
+  const apiKeyGroup = document.getElementById("api-key-group");
 
-  chrome.storage.local.get(["userName", "customApiKey"], function (result) {
+  function toggleApiKeyGroup(mode) {
+    if (mode === "megallm") {
+      apiKeyGroup.classList.add("show");
+    } else {
+      apiKeyGroup.classList.remove("show");
+    }
+  }
+
+  // Load settings từ storage
+  chrome.storage.local.get(["userName", "customApiKey", "translationMode"], function (result) {
     if (result.userName) {
       nameInputGroup.style.display = "none";
       welcomeMessage.style.display = "block";
@@ -17,19 +28,33 @@ document.addEventListener("DOMContentLoaded", function () {
     if (result.customApiKey) {
       apiKeyInput.value = result.customApiKey;
     }
+    // Load translation mode (default: free)
+    const mode = result.translationMode || "free";
+    translationModeSelect.value = mode;
+    toggleApiKeyGroup(mode);
+  });
+
+  // Translation Mode change handler
+  translationModeSelect.addEventListener("change", function () {
+    const mode = translationModeSelect.value;
+    toggleApiKeyGroup(mode);
+    chrome.storage.local.set({ translationMode: mode });
   });
 
   saveButton.addEventListener("click", function () {
     const name = nameInput.value.trim();
     const apiKey = apiKeyInput.value.trim();
+    const translationMode = translationModeSelect.value;
 
-    const dataToSave = {};
+    const dataToSave = {
+      translationMode: translationMode
+    };
 
     if (name) {
       dataToSave.userName = name;
     }
 
-    if (apiKey) {
+    if (translationMode === "megallm" && apiKey) {
       dataToSave.customApiKey = apiKey;
     }
 
