@@ -1,14 +1,41 @@
 let mouseX = 0;
 let mouseY = 0;
-let customApiKey = "";
+let savedSelectedText = "";
+let currentShortcut = { ctrlKey: true, shiftKey: true, altKey: false, key: "" };
 
-function initializeApiKey() {
-  chrome.storage.local.get(["customApiKey"], function (result) {
-    if (result.customApiKey) {
-      customApiKey = result.customApiKey;
-    }
-  });
-}
+// Provider configs - OpenAI-compatible format
+const PROVIDERS = {
+  openai: {
+    name: "OpenAI",
+    url: "https://api.openai.com/v1/chat/completions",
+    defaultModel: "gpt-4o-mini",
+    needsKey: true,
+  },
+  openrouter: {
+    name: "OpenRouter",
+    url: "https://openrouter.ai/api/v1/chat/completions",
+    defaultModel: "deepseek/deepseek-r1-0528:free",
+    needsKey: true,
+  },
+  groq: {
+    name: "Groq",
+    url: "https://api.groq.com/openai/v1/chat/completions",
+    defaultModel: "llama-3.3-70b-versatile",
+    needsKey: true,
+  },
+  megallm: {
+    name: "MegaLLM",
+    url: "https://ai.megallm.io/v1/chat/completions",
+    defaultModel: "deepseek-ai/deepseek-v3.1",
+    needsKey: true,
+  },
+  ollama: {
+    name: "Ollama (Local)",
+    url: "http://localhost:11434/v1/chat/completions",
+    defaultModel: "llama3",
+    needsKey: false,
+  },
+};
 
 function initializeEventListeners() {
   document.removeEventListener("mouseup", handleMouseUp);
@@ -16,66 +43,74 @@ function initializeEventListeners() {
   document.removeEventListener("keydown", handleKeyDown);
   document.addEventListener("keydown", handleKeyDown);
 
-  initializeApiKey();
+  chrome.storage.local.get(["shortcut"], function (result) {
+    if (result.shortcut) currentShortcut = result.shortcut;
+  });
 }
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === "UPDATE_API_KEY" && message.apiKey) {
-    customApiKey = message.apiKey;
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === "UPDATE_SHORTCUT" && message.shortcut) {
+    currentShortcut = message.shortcut;
   }
 });
 
-async function translateWithMegaLLM(text) {
+function matchesShortcut(event, shortcut) {
+  // Only filter lone modifier presses when a specific key is required
+  if (shortcut.key && ["Control", "Shift", "Alt"].includes(event.key)) return false;
+  if (!!shortcut.ctrlKey !== event.ctrlKey) return false;
+  if (!!shortcut.shiftKey !== event.shiftKey) return false;
+  if (!!shortcut.altKey !== event.altKey) return false;
+  if (shortcut.key && event.key.toUpperCase() !== shortcut.key.toUpperCase()) return false;
+  return true;
+}
+
+async function translateWithOpenAICompatible(text, provider, apiKey, model) {
   if (!text || text.length === 0) {
-    showPopup("No text selected", mouseX, mouseY);
+    showPopup("No text selected", mouseX, mouseY, {});
     return null;
   }
 
-  if (!customApiKey) {
+  const providerConfig = PROVIDERS[provider];
+
+  if (providerConfig.needsKey && !apiKey) {
     showPopup(
-      "API Key not found. Please set it in the extension options.",
+      `API Key not found. Please set your ${providerConfig.name} API key in the extension options.`,
       mouseX,
-      mouseY
+      mouseY,
+      {}
     );
     return null;
   }
 
-  const result = await new Promise((resolve) => {
+  const targetLangName = await new Promise((resolve) => {
     chrome.storage.local.get(["selectedLanguageName"], function (result) {
       resolve(result.selectedLanguageName || "Vietnamese");
     });
   });
 
-  // MegaLLM API - OpenAI compatible
-  const apiUrl = "https://ai.megallm.io/v1/chat/completions";
-  const prompt = `
-    Please translate the following text into ${result}:
-    "${text}"
+  const prompt = `Please translate the following text into ${targetLangName}:
+"${text}"
 
-    Requirements:
-    - Only display the meaning of the text in ${result}
-    - For technical terms, keep the original word
-  `;
+Requirements:
+- Only display the meaning of the text in ${targetLangName}
+- For technical terms, keep the original word`;
 
-  const body = JSON.stringify({
-    model: "deepseek-ai/deepseek-v3.1",
-    messages: [
-      {
-        role: "user",
-        content: prompt,
-      },
-    ],
-    temperature: 0.7,
-    max_tokens: 2048,
-  });
+  const usedModel = model || providerConfig.defaultModel;
 
-  const response = await fetch(apiUrl, {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+
+  const response = await fetch(providerConfig.url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${customApiKey}`,
-    },
-    body: body,
+    headers: headers,
+    body: JSON.stringify({
+      model: usedModel,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+      max_tokens: 2048,
+    }),
   });
 
   if (!response.ok) {
@@ -115,7 +150,7 @@ const languageMap = {
 
 async function translateWithGoogleFree(text) {
   if (!text || text.length === 0) {
-    showPopup("No text selected", mouseX, mouseY);
+    showPopup("No text selected", mouseX, mouseY, {});
     return null;
   }
 
@@ -138,7 +173,7 @@ async function translateWithGoogleFree(text) {
     }
 
     const data = await response.json();
-    
+
     if (data && data[0]) {
       return data[0].map(sentence => sentence[0]).join("");
     } else {
@@ -151,12 +186,69 @@ async function translateWithGoogleFree(text) {
   }
 }
 
+
+async function performTranslation() {
+  const selectedText = savedSelectedText;
+  if (!selectedText) return;
+
+  try {
+    const existingPopup = document.querySelector("#translator-popup");
+    if (existingPopup) existingPopup.remove();
+
+    showPopup("Translating...", mouseX, mouseY, { isLoading: true });
+
+    const settings = await new Promise((resolve) => {
+      chrome.storage.local.get(
+        ["translationMode", "apiKeys", "models", "selectedLanguageName"],
+        function (result) { resolve(result); }
+      );
+    });
+
+    const mode = settings.translationMode || "free";
+    const apiKeys = settings.apiKeys || {};
+    const models = settings.models || {};
+    const targetLanguage = settings.selectedLanguageName || "Vietnamese";
+    const providerName = mode === "free"
+      ? "Google Translate"
+      : (PROVIDERS[mode]?.name || mode);
+
+    let translatedText;
+    if (mode === "free") {
+      translatedText = await translateWithGoogleFree(selectedText);
+    } else {
+      translatedText = await translateWithOpenAICompatible(
+        selectedText,
+        mode,
+        apiKeys[mode] || "",
+        models[mode] || ""
+      );
+    }
+
+    if (translatedText) {
+      const loadingPopup = document.querySelector("#translator-popup");
+      if (loadingPopup) loadingPopup.remove();
+
+      showPopup(translatedText, mouseX, mouseY, { providerName });
+      saveToHistory(selectedText, translatedText, providerName, targetLanguage);
+    }
+  } catch (error) {
+    console.error("Translation API failed:", error);
+    const existing = document.querySelector("#translator-popup");
+    if (existing) existing.remove();
+    showPopup("Translation failed, please try again", mouseX, mouseY, {});
+  }
+}
+
+// ============================================================
+// Mouse & keyboard handlers
+// ============================================================
+
 function handleMouseUp() {
   const selection = window.getSelection();
   const selectedText = selection.toString().trim();
 
   if (selectedText) {
-    localStorage.setItem("selectedText", selectedText);
+    savedSelectedText = selectedText;
 
     const range = selection.getRangeAt(0);
     const rect = range.getBoundingClientRect();
@@ -166,50 +258,30 @@ function handleMouseUp() {
   }
 }
 
-function showLoadingPopup(x, y) {
-  showPopup("Translating...", x, y);
-  const popup = document.querySelector("#translator-popup");
-  if (popup) {
-    popup.style.backgroundColor = "#f8f9fa";
-    popup.style.fontStyle = "italic";
+function handleKeyDown(event) {
+  if (matchesShortcut(event, currentShortcut) && checkSelection()) {
+    performTranslation();
   }
 }
 
-async function handleKeyDown(event) {
-  if (event.ctrlKey && event.shiftKey && checkSelection()) {
-    let selectedText = localStorage.getItem("selectedText");
-    if (selectedText) {
-      try {
-        const existingPopup = document.querySelector("#translator-popup");
-        if (existingPopup) {
-          existingPopup.remove();
-        }
+// ============================================================
+// Helpers
+// ============================================================
 
-        showLoadingPopup(mouseX, mouseY);
-
-        const mode = await new Promise((resolve) => {
-          chrome.storage.local.get(["translationMode"], function (result) {
-            resolve(result.translationMode || "free");
-          });
-        });
-
-        let translatedText;
-        if (mode === "megallm") {
-          translatedText = await translateWithMegaLLM(selectedText);
-        } else {
-          translatedText = await translateWithGoogleFree(selectedText);
-        }
-
-        if (translatedText) {
-          showPopup(translatedText, mouseX, mouseY);
-          document.addEventListener("click", handleOutsideClick);
-        }
-      } catch (error) {
-        console.error("Translation API failed:", error);
-        showPopup("Translation failed, please try again", mouseX, mouseY);
-      }
-    }
-  }
+function saveToHistory(original, translated, providerName, targetLanguage) {
+  chrome.storage.local.get(["translationHistory"], function (result) {
+    const history = result.translationHistory || [];
+    history.unshift({
+      id: Date.now(),
+      original: original.substring(0, 300),
+      translated: translated.substring(0, 600),
+      providerName: providerName,
+      targetLanguage: targetLanguage,
+      timestamp: Date.now(),
+    });
+    if (history.length > 30) history.length = 30;
+    chrome.storage.local.set({ translationHistory: history });
+  });
 }
 
 function checkSelection() {
@@ -218,7 +290,8 @@ function checkSelection() {
     showPopup(
       "Selected text is too long. Please select a shorter text.(Max 1500 words)",
       mouseX,
-      mouseY
+      mouseY,
+      {}
     );
     return false;
   }
@@ -233,70 +306,165 @@ function handleOutsideClick(event) {
   }
 }
 
-function showPopup(text, x, y) {
+function showPopup(text, x, y, options) {
   let popup = document.querySelector("#translator-popup");
+  if (popup) popup.remove();
 
-  if (!popup) {
-    popup = document.createElement("div");
-    popup.id = "translator-popup";
+  popup = document.createElement("div");
+  popup.id = "translator-popup";
 
-    const styles = {
-      position: "absolute",
-      backgroundColor: "#ffffff",
-      border: "1px solid #e0e0e0",
-      color: "#333333",
-      padding: "12px 16px",
-      zIndex: 999999,
-      boxShadow: "0 2px 10px rgba(0,0,0,0.1)",
-      borderRadius: "8px",
-      maxWidth: "400px",
-      minWidth: "200px",
+  Object.assign(popup.style, {
+    position: "absolute",
+    backgroundColor: "#ffffff",
+    border: "1px solid #e0e0e0",
+    color: "#333333",
+    zIndex: "999999",
+    boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+    borderRadius: "10px",
+    maxWidth: "420px",
+    minWidth: "200px",
+    fontFamily: "'Montserrat', sans-serif",
+    fontSize: "14px",
+    overflow: "hidden",
+    opacity: "0",
+    transform: "translateY(8px)",
+    transition: "opacity 0.2s ease, transform 0.2s ease",
+  });
+
+  // --- Header ---
+  const header = document.createElement("div");
+  Object.assign(header.style, {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "7px 12px",
+    backgroundColor: options.isLoading ? "#f8f9fa" : "#f0f7ff",
+    borderBottom: options.isLoading ? "none" : "1px solid #e8eef5",
+  });
+
+  const providerLabel = document.createElement("span");
+  Object.assign(providerLabel.style, {
+    fontSize: "12px",
+    fontWeight: "600",
+    color: options.isLoading ? "#999" : "#4a90d9",
+    fontStyle: options.isLoading ? "italic" : "normal",
+  });
+  providerLabel.innerText = options.isLoading
+    ? "Translating..."
+    : (options.providerName || "Translator");
+
+  header.appendChild(providerLabel);
+
+  // Action buttons (only for result state)
+  if (!options.isLoading) {
+    const actions = document.createElement("div");
+    Object.assign(actions.style, { display: "flex", gap: "4px", alignItems: "center" });
+
+    // Copy button
+    const copyBtn = document.createElement("button");
+    copyBtn.innerText = "Copy";
+    Object.assign(copyBtn.style, {
+      fontSize: "11px",
+      padding: "2px 8px",
+      border: "1px solid #d0d9e8",
+      borderRadius: "4px",
+      backgroundColor: "#fff",
+      cursor: "pointer",
+      color: "#555",
+      fontFamily: "inherit",
+    });
+    copyBtn.addEventListener("mouseover", function () { copyBtn.style.backgroundColor = "#f0f7ff"; });
+    copyBtn.addEventListener("mouseout", function () { copyBtn.style.backgroundColor = "#fff"; });
+    copyBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      navigator.clipboard.writeText(text).then(function () {
+        copyBtn.innerText = "✓ Copied!";
+        copyBtn.style.color = "#4caf50";
+        copyBtn.style.borderColor = "#4caf50";
+        setTimeout(function () {
+          copyBtn.innerText = "Copy";
+          copyBtn.style.color = "#555";
+          copyBtn.style.borderColor = "#d0d9e8";
+        }, 1500);
+      });
+    });
+
+    // Close button
+    const closeBtn = document.createElement("button");
+    closeBtn.innerText = "✕";
+    Object.assign(closeBtn.style, {
+      fontSize: "12px",
+      padding: "2px 6px",
+      border: "none",
+      borderRadius: "4px",
+      backgroundColor: "transparent",
+      cursor: "pointer",
+      color: "#aaa",
+      fontFamily: "inherit",
+    });
+    closeBtn.addEventListener("mouseover", function () { closeBtn.style.color = "#555"; });
+    closeBtn.addEventListener("mouseout", function () { closeBtn.style.color = "#aaa"; });
+    closeBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      popup.remove();
+      document.removeEventListener("click", handleOutsideClick);
+    });
+
+    actions.appendChild(copyBtn);
+    actions.appendChild(closeBtn);
+    header.appendChild(actions);
+  }
+
+  popup.appendChild(header);
+
+  // --- Body (only for non-loading) ---
+  if (!options.isLoading) {
+    const body = document.createElement("div");
+    body.innerText = text;
+    Object.assign(body.style, {
+      padding: "12px 14px",
       lineHeight: "1.6",
-      fontSize: "14px",
-      fontFamily: "'Montserrat', sans-serif",
       whiteSpace: "pre-line",
-      transition: "opacity 0.2s ease",
-      opacity: "0",
-      transform: "translateY(10px)",
-    };
-
-    Object.assign(popup.style, styles);
-    document.body.appendChild(popup);
-
-    document.addEventListener("click", handleOutsideClick);
-
-    setTimeout(() => {
-      popup.style.opacity = "1";
-      popup.style.transform = "translateY(0)";
-    }, 50);
+    });
+    popup.appendChild(body);
   }
 
-  popup.innerText = text;
+  document.body.appendChild(popup);
+  document.addEventListener("click", handleOutsideClick);
 
-  const viewportWidth = window.innerWidth;
-  const viewportHeight = window.innerHeight;
-  const popupRect = popup.getBoundingClientRect();
+  // Initial position
+  popup.style.left = Math.max(0, x) + "px";
+  popup.style.top = Math.max(0, y) + "px";
 
-  if (x + popupRect.width > viewportWidth) {
-    x = viewportWidth - popupRect.width - 20;
-  }
+  // Animate in + adjust position after render
+  requestAnimationFrame(function () {
+    const popupRect = popup.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
 
-  if (y + popupRect.height > viewportHeight) {
-    y = y - popupRect.height - 20;
-  }
+    let newLeft = parseFloat(popup.style.left);
+    let newTop = parseFloat(popup.style.top);
 
-  popup.style.left = `${Math.max(0, x)}px`;
-  popup.style.top = `${Math.max(0, y)}px`;
+    if (popupRect.right > viewportWidth) {
+      newLeft -= (popupRect.right - viewportWidth + 20);
+    }
+    if (popupRect.bottom > viewportHeight) {
+      newTop -= (popupRect.height + 20);
+    }
+
+    popup.style.left = Math.max(0, newLeft) + "px";
+    popup.style.top = Math.max(0, newTop) + "px";
+    popup.style.opacity = "1";
+    popup.style.transform = "translateY(0)";
+  });
 }
 
 function cleanup() {
   document.removeEventListener("mouseup", handleMouseUp);
   document.removeEventListener("keydown", handleKeyDown);
   const popup = document.querySelector("#translator-popup");
-  if (popup) {
-    popup.remove();
-  }
-  localStorage.removeItem("selectedText");
+  if (popup) popup.remove();
+  savedSelectedText = "";
 }
 
 initializeEventListeners();
